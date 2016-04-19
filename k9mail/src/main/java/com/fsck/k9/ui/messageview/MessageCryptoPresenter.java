@@ -3,10 +3,15 @@ package com.fsck.k9.ui.messageview;
 
 import android.app.Activity;
 import android.app.PendingIntent;
+import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
+import android.content.pm.PackageManager.NameNotFoundException;
+import android.graphics.drawable.Drawable;
+import android.support.annotation.Nullable;
 import android.util.Log;
 
+import com.fsck.k9.Account;
 import com.fsck.k9.K9;
 import com.fsck.k9.mailstore.MessageViewInfo;
 import com.fsck.k9.view.MessageCryptoDisplayStatus;
@@ -16,12 +21,14 @@ public class MessageCryptoPresenter implements OnCryptoClickListener {
     public static final int REQUEST_CODE_UNKNOWN_KEY = 123;
 
 
-    MessageCryptoMvpView messageCryptoMvpView;
+    private final Context context;
+    private final MessageCryptoMvpView messageCryptoMvpView;
 
     private MessageViewInfo messageViewInfo;
 
 
-    public MessageCryptoPresenter(MessageCryptoMvpView messageCryptoMvpView) {
+    public MessageCryptoPresenter(Context context, MessageCryptoMvpView messageCryptoMvpView) {
+        this.context = context;
         this.messageCryptoMvpView = messageCryptoMvpView;
     }
 
@@ -87,6 +94,23 @@ public class MessageCryptoPresenter implements OnCryptoClickListener {
             }
         } catch (IntentSender.SendIntentException e) {
             Log.e(K9.LOG_TAG, "SendIntentException", e);
+        }
+    }
+
+    public void onClickRetryCryptoOperation() {
+        messageCryptoMvpView.restartMessageCryptoProcessing();
+    }
+
+    @Nullable
+    public Drawable getOpenPgpApiProviderIcon(Account account) {
+        try {
+            String openPgpProvider = account.getOpenPgpProvider();
+            if (Account.NO_OPENPGP_PROVIDER.equals(openPgpProvider)) {
+                return null;
+            }
+            return context.getPackageManager().getApplicationIcon(openPgpProvider);
+        } catch (NameNotFoundException e) {
+            return null;
         }
     }
 

@@ -27,6 +27,7 @@ import com.fsck.k9.mail.Multipart;
 import com.fsck.k9.mail.Part;
 import com.fsck.k9.mail.internet.MessageExtractor;
 import com.fsck.k9.mail.internet.MimeBodyPart;
+import com.fsck.k9.mail.internet.MimeMultipart;
 import com.fsck.k9.mail.internet.SizeAware;
 import com.fsck.k9.mail.internet.TextBody;
 import com.fsck.k9.mailstore.CryptoResultAnnotation;
@@ -122,7 +123,7 @@ public class MessageCryptoHelper {
     private void processFoundEncryptedParts(List<Part> foundParts) {
         for (Part part : foundParts) {
             if (!MessageHelper.isCompletePartAvailable(part)) {
-                addErrorAnnotation(part, CryptoError.ENCRYPTED_BUT_INCOMPLETE, MessageHelper.createEmptyPart());
+                addErrorAnnotation(part, CryptoError.OPENPGP_ENCRYPTED_BUT_INCOMPLETE, MessageHelper.createEmptyPart());
                 continue;
             }
             if (MessageDecryptVerifier.isPgpMimeEncryptedOrSignedPart(part)) {
@@ -137,7 +138,8 @@ public class MessageCryptoHelper {
     private void processFoundSignedParts(List<Part> foundParts) {
         for (Part part : foundParts) {
             if (!MessageHelper.isCompletePartAvailable(part)) {
-                addErrorAnnotation(part, CryptoError.SIGNED_BUT_INCOMPLETE, NO_REPLACEMENT_PART);
+                MimeBodyPart replacementPart = (MimeBodyPart) ((MimeMultipart) part.getBody()).getBodyPart(0);
+                addErrorAnnotation(part, CryptoError.OPENPGP_SIGNED_BUT_INCOMPLETE, replacementPart);
                 continue;
             }
             if (MessageDecryptVerifier.isPgpMimeEncryptedOrSignedPart(part)) {
