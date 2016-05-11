@@ -57,28 +57,31 @@ public class MessageCryptoHelper {
 
     private final Context context;
     private final String openPgpProviderPackage;
+    private final Object callbackLock = new Object();
+
     @Nullable
     private MessageCryptoCallback callback;
 
-    private Deque<CryptoPart> partsToDecryptOrVerify = new ArrayDeque<>();
-    private OpenPgpApi openPgpApi;
-    private CryptoPart currentCryptoPart;
-    private Intent currentCryptoResult;
+    private LocalMessage currentMessage;
+    private MessageCryptoAnnotations queuedResult;
+    private PendingIntent queuedPendingIntent;
+
 
     private MessageCryptoAnnotations messageAnnotations;
+    private Deque<CryptoPart> partsToDecryptOrVerify = new ArrayDeque<>();
+    private CryptoPart currentCryptoPart;
+    private Intent currentCryptoResult;
     private Intent userInteractionResultIntent;
-    private LocalMessage currentMessage;
     private boolean secondPassStarted;
     private CancelableBackgroundOperation cancelableBackgroundOperation;
-    private PendingIntent queuedPendingIntent;
-    private MessageCryptoAnnotations queuedMessageAnnotations;
     private boolean isCancelled;
 
+    private OpenPgpApi openPgpApi;
+    private OpenPgpServiceConnection openPgpServiceConnection;
 
-    public MessageCryptoHelper(Context context, String openPgpProviderPackage,
-            @Nullable MessageCryptoCallback callback) {
+
+    public MessageCryptoHelper(Context context, String openPgpProviderPackage) {
         this.context = context.getApplicationContext();
-        this.callback = callback;
         this.openPgpProviderPackage = openPgpProviderPackage;
 
         if (openPgpProviderPackage == null || Account.NO_OPENPGP_PROVIDER.equals(openPgpProviderPackage)) {
@@ -86,9 +89,15 @@ public class MessageCryptoHelper {
         }
     }
 
-    public void decryptOrVerifyMessagePartsIfNecessary(LocalMessage message) {
+    public void asyncStartOrResumeProcessingMessage(LocalMessage message, MessageCryptoCallback callback) {
+        if (this.currentMessage != null) {
+            reattachCallback(message, callback);
+            return;
+        }
+
         this.messageAnnotations = new MessageCryptoAnnotations();
         this.currentMessage = message;
+        this.callback = callback;
 
         runFirstPass();
     }
@@ -179,7 +188,7 @@ public class MessageCryptoHelper {
     }
 
     private void connectToCryptoProviderService() {
-        new OpenPgpServiceConnection(context, openPgpProviderPackage,
+        openPgpServiceConnection = new OpenPgpServiceConnection(context, openPgpProviderPackage,
                 new OnBound() {
                     @Override
                     public void onBound(IOpenPgpService2 service) {
@@ -192,7 +201,8 @@ public class MessageCryptoHelper {
                     public void onError(Exception e) {
                         Log.e(K9.LOG_TAG, "Couldn't connect to OpenPgpService", e);
                     }
-                }).bindToService();
+                });
+        openPgpServiceConnection.bindToService();
     }
 
     private void decryptOrVerifyPart(CryptoPart cryptoPart) {
@@ -247,6 +257,7 @@ public class MessageCryptoHelper {
 
             @Override
             public void onReturn(Intent result, MimeBodyPart bodyPart) {
+                cancelableBackgroundOperation = null;
                 currentCryptoResult = result;
                 onCryptoOperationReturned(bodyPart);
             }
@@ -286,6 +297,7 @@ public class MessageCryptoHelper {
                 new IOpenPgpSinkResultCallback<MimeBodyPart>() {
             @Override
             public void onReturn(Intent result, MimeBodyPart decryptedPart) {
+                cancelableBackgroundOperation = null;
                 currentCryptoResult = result;
                 onCryptoOperationReturned(decryptedPart);
             }
@@ -307,6 +319,7 @@ public class MessageCryptoHelper {
         openPgpApi.executeApiAsync(intent, dataSource, new IOpenPgpSinkResultCallback<Void>() {
             @Override
             public void onReturn(Intent result, Void dummy) {
+                cancelableBackgroundOperation = null;
                 currentCryptoResult = result;
                 onCryptoOperationReturned(null);
             }
@@ -467,7 +480,7 @@ public class MessageCryptoHelper {
         CryptoResultAnnotation resultAnnotation = CryptoResultAnnotation.createOpenPgpResultAnnotation(
                 decryptionResult, signatureResult, pendingIntent, outputPart);
 
-        onCryptoSuccess(resultAnnotation);
+        onCryptoOperationSuccess(resultAnnotation);
     }
 
     public void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -486,7 +499,7 @@ public class MessageCryptoHelper {
         }
     }
 
-    private void onCryptoSuccess(CryptoResultAnnotation resultAnnotation) {
+    private void onCryptoOperationSuccess(CryptoResultAnnotation resultAnnotation) {
         addCryptoResultAnnotationToMessage(resultAnnotation);
         onCryptoFinished();
     }
@@ -522,6 +535,7 @@ public class MessageCryptoHelper {
     }
 
     private void onCryptoFinished() {
+        currentCryptoPart = null;
         partsToDecryptOrVerify.removeFirst();
         decryptOrVerifyNextPart();
     }
@@ -535,7 +549,14 @@ public class MessageCryptoHelper {
         runSecondPass();
     }
 
-    private final Object callbackLock = new Object();
+    private void cleanupAfterProcessingFinished() {
+        partsToDecryptOrVerify = null;
+        openPgpApi = null;
+        if (openPgpServiceConnection != null) {
+            openPgpServiceConnection.unbindFromService();
+        }
+        openPgpServiceConnection = null;
+    }
 
     public void detachCallback() {
         synchronized (callbackLock) {
@@ -543,7 +564,10 @@ public class MessageCryptoHelper {
         }
     }
 
-    public void reattachCallback(MessageCryptoCallback callback) {
+    private void reattachCallback(LocalMessage message, MessageCryptoCallback callback) {
+        if (!message.equals(currentMessage)) {
+            throw new AssertionError("Callback may only be reattached for the same message!");
+        }
         synchronized (callbackLock) {
             this.callback = callback;
             deliverResult();
@@ -559,7 +583,11 @@ public class MessageCryptoHelper {
 
     private void callbackReturnResult() {
         synchronized (callbackLock) {
-            queuedMessageAnnotations = messageAnnotations;
+            cleanupAfterProcessingFinished();
+
+            queuedResult = messageAnnotations;
+            messageAnnotations = null;
+
             deliverResult();
         }
     }
@@ -582,8 +610,8 @@ public class MessageCryptoHelper {
             Log.d(K9.LOG_TAG, "Keeping crypto helper result in queue for later delivery");
             return;
         }
-        if (queuedMessageAnnotations != null) {
-            callback.onCryptoOperationsFinished(queuedMessageAnnotations);
+        if (queuedResult != null) {
+            callback.onCryptoOperationsFinished(queuedResult);
         } else if (queuedPendingIntent != null) {
             callback.startPendingIntentForCryptoHelper(
                     queuedPendingIntent.getIntentSender(), REQUEST_CODE_USER_INTERACTION, null, 0, 0, 0);
